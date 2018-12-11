@@ -1,0 +1,315 @@
+/*
+ * proxy.c - ICS Web proxy
+ *
+ *
+ */
+
+#include "csapp.h"
+#include <stdarg.h>
+#include <sys/select.h>
+#include <stdlib.h>
+
+/*
+ * Function prototypes
+ */
+int parse_uri(char *uri, char *target_addr, char *path, char *port);
+void format_log_entry(char *logstring, struct sockaddr_in *sockaddr, char *uri, size_t size);
+
+sem_t mutex1, mutex2;
+
+struct clientInfo{
+    int id;
+    int connfd;
+    struct sockaddr_storage clientaddr;
+};
+
+
+ssize_t Rio_writen_w(int fd, void *usrbuf, size_t n) 
+{
+    ssize_t rc;
+    if ((rc = rio_writen(fd, usrbuf, n)) != n) {
+        fprintf(stderr,"Rio_writen error\n");
+	return 0;
+    }
+    return rc;
+}
+
+ssize_t Rio_readlineb_w(rio_t *rp, void *usrbuf, size_t maxlen) 
+{
+    ssize_t rc;
+
+    if ((rc = rio_readlineb(rp, usrbuf, maxlen)) < 0) {
+        fprintf(stderr,"Rio_readlineb error\n");
+	return 0;
+    }
+    return rc;
+}
+
+ssize_t Rio_readnb_w(rio_t *rp, void *usrbuf, size_t maxlen) 
+{
+    ssize_t rc;
+
+    if ((rc = rio_readnb(rp, usrbuf, maxlen)) < 0) {
+        fprintf(stderr,"Rio_readnb error\n");
+	return 0;
+    }
+    return rc;
+}
+
+void *thread(void *client) {
+    Pthread_detach(pthread_self());
+    doit(client);
+    return NULL;
+}
+
+void doit(struct clientInfo * client)
+{
+    int connfd = client->connfd,ccount=0,scount=0,sum=0;
+    size_t n;
+    int clientfd;
+    char buf[MAXLINE],uri[3*MAXLINE],hostname[MAXLINE],pathname[MAXLINE],port[MAXLINE],method[MAXLINE],version[MAXLINE],logstring[MAXLINE];
+    rio_t rio_connfd,rio_clientfd;
+    struct sockaddr_storage clientaddr= client->clientaddr;
+    free(client);
+
+    rio_readinitb(&rio_connfd, connfd);
+    if (Rio_readlineb_w(&rio_connfd, buf, MAXLINE) == 0){
+	fprintf(stderr,"-1");
+	close(connfd);
+	return;
+    }
+    sscanf(buf, "%s %s %s", method, uri, version);
+    if (strcmp("HTTP/1.1",version)){
+	close(connfd);
+	return;
+    }
+    if (parse_uri(uri,hostname,pathname,port)!=0){
+	close(connfd);
+	return;
+    }
+    /*printf("mathod:%s\nuri:%s\nversion:%s\nhostname:%s\npathname:%s\nport:%s\n",method,uri,version,hostname,pathname,port);*/
+
+    strcpy(buf,method);
+    strcat(buf," /");
+    strcat(buf,pathname);
+    strcat(buf," ");
+    strcat(buf,version);
+    strcat(buf,"\r\n");
+
+    clientfd = open_clientfd(hostname,port);
+    if (clientfd == -1){
+	fprintf(stderr,"open_clientfd error\n");
+	close(connfd);
+	return;
+    }
+    
+    if (Rio_writen_w(clientfd, buf, strlen(buf)) == 0){
+	close(connfd);
+	close(clientfd);
+	return;
+    }
+
+    while((n = Rio_readlineb_w(&rio_connfd, buf, MAXLINE)) != 0){
+	if (Rio_writen_w(clientfd, buf, n) == 0){
+	    fprintf(stderr,"2");
+	    close(connfd);
+	    close(clientfd);
+	    return;
+	}
+	if (!strcmp(buf,"\r\n"))
+            break;
+	if (!strncmp("Content-Length: ", buf, 16))
+	    sscanf(&buf[16], "%d", &ccount);
+    }
+
+    if (n==0){
+	fprintf(stderr,"-2");
+	close(connfd);
+	close(clientfd);
+	return;
+    }
+
+    fprintf(stderr,"method: %s ccount: %d\n",method,ccount);
+    if (!strcmp("POST",method)){
+	for (int i=0;i<ccount;i++){
+    	    if ((n=Rio_readnb_w(&rio_connfd,buf,1)) == 0){
+	    	close(connfd);
+	    	close(clientfd);
+	    	return;
+	    }
+	    if (Rio_writen_w(clientfd,buf,1) == 0){
+	    	close(connfd);
+	    	close(clientfd);
+	    	return;
+	    }
+	}
+	fprintf(stderr,"n: %d\n",n);
+    }	
+
+    rio_readinitb(&rio_clientfd, clientfd);
+    while ((n = Rio_readlineb_w(&rio_clientfd, buf, MAXLINE)) > 0){
+	sum+=n;
+	if (Rio_writen_w(connfd, buf, n) == 0){
+	    close(connfd);
+	    close(clientfd);
+	    return;
+	}
+	if (!strcmp(buf,"\r\n"))
+	    break;
+	if (!strncmp("Content-Length: ", buf, 16))
+	    sscanf(&buf[16], "%d", &scount);
+    }
+    if (n==0){
+	fprintf(stderr,"-3");
+	close(connfd);
+	close(clientfd);
+	return;
+    }
+    sum+=scount;
+    for (int i=0;i<scount;i++){
+    	if ((n=Rio_readnb_w(&rio_clientfd,buf,1)) == 0){
+	    close(connfd);
+	    close(clientfd);
+	    return;
+        }
+    	if (Rio_writen_w(connfd,buf,1) == 0){
+	    close(connfd);
+	    close(clientfd);
+	    return;
+        }
+    }
+    close(clientfd);
+    P(&mutex1);
+    format_log_entry(logstring, &clientaddr,uri,sum);
+    printf("%s\n",logstring);
+    V(&mutex1);
+    close(connfd);
+    return;
+}
+
+/*
+ * main - Main routine for the proxy program
+ */
+int main(int argc, char **argv)
+{
+    int listenfd;
+    socklen_t clientlen;
+    pthread_t tid;
+    struct clientInfo *client;
+    int id=0;
+
+    Signal(SIGPIPE, SIG_IGN);
+
+    Sem_init(&mutex1, 0, 1);
+    Sem_init(&mutex2, 0, 1);
+
+    /* Check arguments */
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <port number>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = open_listenfd(argv[1]);
+    while(1){
+	clientlen = sizeof(struct sockaddr_storage);
+	client = Malloc(sizeof(struct clientInfo));
+	client->connfd = Accept(listenfd, (SA *)&(client->clientaddr), &clientlen);
+	id++;
+	client->id = id;
+	//doit(client);
+	pthread_create(&tid, NULL, thread, client);
+	printf("NEXT\n");
+    }
+    exit(0);  
+}
+
+
+
+/*
+ * parse_uri - URI parser
+ *
+ * Given a URI from an HTTP proxy GET request (i.e., a URL), extract
+ * the host name, path name, and port.  The memory for hostname and
+ * pathname must already be allocated and should be at least MAXLINE
+ * bytes. Return -1 if there are any problems.
+ */
+int parse_uri(char *uri, char *hostname, char *pathname, char *port)
+{
+    char *hostbegin;
+    char *hostend;
+    char *pathbegin;
+    int len;
+
+    if (strncasecmp(uri, "http://", 7) != 0) {
+        hostname[0] = '\0';
+        return -1;
+    }
+
+    /* Extract the host name */
+    hostbegin = uri + 7;
+    hostend = strpbrk(hostbegin, " :/\r\n\0");
+    if (hostend == NULL)
+        return -1;
+    len = hostend - hostbegin;
+    strncpy(hostname, hostbegin, len);
+    hostname[len] = '\0';
+
+    /* Extract the port number */
+    if (*hostend == ':') {
+        char *p = hostend + 1;
+        while (isdigit(*p))
+            *port++ = *p++;
+        *port = '\0';
+    } else {
+        strcpy(port, "80");
+    }
+
+    /* Extract the path */
+    pathbegin = strchr(hostbegin, '/');
+    if (pathbegin == NULL) {
+        pathname[0] = '\0';
+    }
+    else {
+        pathbegin++;
+        strcpy(pathname, pathbegin);
+    }
+
+    return 0;
+}
+
+/*
+ * format_log_entry - Create a formatted log entry in logstring.
+ *
+ * The inputs are the socket address of the requesting client
+ * (sockaddr), the URI from the request (uri), the number of bytes
+ * from the server (size).
+ */
+void format_log_entry(char *logstring, struct sockaddr_in *sockaddr,
+                      char *uri, size_t size)
+{
+    time_t now;
+    char time_str[MAXLINE];
+    unsigned long host;
+    unsigned char a, b, c, d;
+
+    /* Get a formatted time string */
+    now = time(NULL);
+    strftime(time_str, MAXLINE, "%a %d %b %Y %H:%M:%S %Z", localtime(&now));
+
+    /*
+     * Convert the IP address in network byte order to dotted decimal
+     * form. Note that we could have used inet_ntoa, but chose not to
+     * because inet_ntoa is a Class 3 thread unsafe function that
+     * returns a pointer to a static variable (Ch 12, CS:APP).
+     */
+    host = ntohl(sockaddr->sin_addr.s_addr);
+    a = host >> 24;
+    b = (host >> 16) & 0xff;
+    c = (host >> 8) & 0xff;
+    d = host & 0xff;
+
+    /* Return the formatted log entry string */
+    sprintf(logstring, "%s: %d.%d.%d.%d %s %zu", time_str, a, b, c, d, uri, size);
+}
+
+

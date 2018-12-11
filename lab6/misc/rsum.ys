@@ -1,0 +1,56 @@
+#name: wulianyi
+#ID: 516030910252
+
+	.pos 0
+init:	irmovq Stack, %rsp 
+	irmovq Stack, %rbp 
+	jmp Main
+
+
+# Sample linked list
+	.align 8
+ele1:
+	.quad 0x00a
+	.quad ele2
+ele2:
+	.quad 0x0b0
+	.quad ele3
+ele3:
+	.quad 0xc00
+	.quad 0
+
+Main:	pushq %rbp 
+	rrmovq %rsp,%rbp
+	xorq %rax,%rax
+	pushq %rax	
+	irmovq ele1,%rdx
+	pushq %rdx    	
+	call Sum	
+	rrmovq %rbp,%rsp
+	popq %rbp
+	halt
+
+#/* $begin sum-ys 0 */
+	# int Sum(int *Start)
+Sum:	pushq %rbp
+	rrmovq %rsp,%rbp
+	mrmovq 16(%rbp),%rcx 	# rcx = Start
+	mrmovq 24(%rbp),%rax
+	irmovq $0,%rdi
+	addq %rdi,%rcx	
+	je     End
+	mrmovq (%rcx),%rsi
+	addq %rsi,%rax 	
+	mrmovq 8(%rcx),%rcx
+	pushq %rax
+	pushq %rcx
+	call Sum         
+End:	rrmovq %rbp,%rsp
+	popq %rbp
+	ret
+#/* $end sum-ys 0 */
+
+# The stack starts here and grows to lower addresses
+	.pos 0x200		
+Stack:	 
+

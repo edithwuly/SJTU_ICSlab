@@ -1,0 +1,63 @@
+#name: wulianyi
+#ID: 516030910252
+
+	.pos 0
+init:	irmovq Stack, %rsp 
+	irmovq Stack, %rbp 
+	jmp Main
+
+
+	.align 8
+# Source block
+src:	.quad 0x00a
+	.quad 0x0b0
+	.quad 0xc00
+
+# Destination block
+dest:	.quad 0x111
+	.quad 0x222
+	.quad 0x333
+
+Main:	pushq %rbp 
+	rrmovq %rsp,%rbp	
+	irmovq src,%rcx
+	irmovq dest,%rdx
+	irmovq $0x3,%rax
+	pushq %rax
+	pushq %rdx  
+	pushq %rcx    	
+	call Copy	
+	rrmovq %rbp,%rsp
+	popq %rbp
+	halt
+
+#/* $begin sum-ys 0 */
+	# long copy_block(long *src, long *dest, long len)
+Copy:	pushq %rbp
+	rrmovq %rsp,%rbp
+	mrmovq 32(%rbp),%rbx
+	mrmovq 16(%rbp),%rcx 	
+	mrmovq 24(%rbp),%rdx
+	irmovq $0,%rax		
+	irmovq $0,%rdi	
+	irmovq $1,%r8
+	irmovq $8,%r9
+	addq %rdi,%rbx
+	je     End
+Loop:	mrmovq (%rcx),%r10
+	rmmovq %r10,(%rdx)
+	xorq %r10,%rax
+	subq %r8,%rbx          
+	addq %r9,%rcx
+	addq %r9,%rdx
+	addq %rdi,%rbx
+	jne    Loop             
+End:	rrmovq %rbp,%rsp
+	popq %rbp
+	ret
+
+
+# The stack starts here and grows to lower addresses
+	.pos 0x300		
+Stack:	 
+
